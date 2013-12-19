@@ -1,0 +1,11 @@
+{application, entity_supervisor,
+ [
+  {description, "Simple Supervisor for Entity Processes"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {env, []}
+ ]}.
