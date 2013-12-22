@@ -26,7 +26,8 @@
               attribute/0,
               mfargs/0,
               restart/0,
-              shutdown/0
+              shutdown/0,
+              system_event/0
              ]).
 
 %%--------------------------------------------------------------------------------
@@ -35,6 +36,9 @@
 -callback init(Args) -> {ok, EntityCreationSpec} when
       Args               :: term(),
       EntityCreationSpec :: {CreateFunSpec::mfargs(), restart(), shutdown()}.
+
+%% optional callback
+%% -callback handle_event(system_event()) -> any().
 
 %%--------------------------------------------------------------------------------
 %% 'gen_server' Callback API
@@ -48,6 +52,7 @@
 
 -record(?STATE,
         {
+          module        :: module(),
           create_mfargs :: mfargs(),
           restart       :: restart(),
           shutdown      :: shutdown(),
@@ -75,6 +80,9 @@
 -type shutdown() :: brutal_kill | timeout().
 
 -type entity() :: {entity_id(), pid(), [attribute()]}.
+
+-type system_event() :: {'ENTITY_CREATED', entity()}
+                      | {'ENTITY_DELETED', entity(), Reason::term()}.
 
 %%--------------------------------------------------------------------------------
 %% Exported Functions
@@ -144,6 +152,7 @@ init([TableName, Module, Args]) ->
             none         -> ets:new(id_to_entity, [set, protected])
         end,
     State = #?STATE{
+                module        = Module,
                 create_mfargs = MFArgs,
                 restart       = Restart,
                 shutdown      = Shutdown,
@@ -181,10 +190,12 @@ handle_info({exit_timeout, Pid}, State) ->
     true = exit(Pid, kill),
     {noreply, State};
 handle_info({'EXIT', Pid, Reason}, State) ->
-    case dict:find(Pid, State#?STATE.pid_to_id) of
+    #?STATE{pid_to_id = PidToId, id_to_entity = IdToEntity, module = Module} = State,
+    case dict:find(Pid, PidToId) of
         error     -> {stop, Reason};
         {ok,  Id} ->
-            [Entity] = ets:lookup(State#?STATE.id_to_entity, Id),
+            [Entity] = ets:lookup(IdToEntity, Id),
+            ok = handle_event_if_exported(Module, {'ENTITY_DELETED', Entity, Reason}),
             {noreply, delete_entity_entry(Entity, State)}
     end;
 handle_info(Info, State) ->
@@ -230,6 +241,7 @@ do_create_entity({Id, Attributes, Args}, State) ->
                 {ok, EntityPid} ->
                     true = link(EntityPid),
                     Entity = {Id, EntityPid, Attributes},
+                    ok = handle_event_if_exported(State#?STATE.module, {'ENTITY_CREATED', Entity}),
                     State2 = insert_entity_entry(Entity, State),
                     {{ok, EntityPid}, State2};
                 Other ->
@@ -364,3 +376,18 @@ delete_entity_entry(Entity, State) ->
           State#?STATE.attr_to_ids,
           Attributes),
     State#?STATE{pid_to_id = PidToId, attr_to_ids = AttrToPids}.
+
+-spec handle_event_if_exported(module(), term()) -> ok.
+handle_event_if_exported(Module, Event) ->
+    _ = case erlang:function_exported(Module, handle_event, 1) of
+            false -> ok;
+            true  -> 
+                try Module:handle_event(Event) of
+                    _ -> ok
+                catch
+                    Class:Reason ->
+                        error_logger:warning_msg("~p:handle_event/1 error(~p): reason=~p, event=~p, trace=~p",
+                                                 [Module, Class, Reason, Event, erlang:get_stacktrace()])
+                end
+        end,
+    ok.
