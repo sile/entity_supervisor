@@ -192,7 +192,10 @@ handle_info({exit_timeout, Pid}, State) ->
 handle_info({'EXIT', Pid, Reason}, State) ->
     #?STATE{pid_to_id = PidToId, id_to_entity = IdToEntity, module = Module} = State,
     case dict:find(Pid, PidToId) of
-        error     -> {stop, Reason};
+        error ->
+            %% NOTE: エンティティの起動がstart_link関数で行われ、かつそのinit/1の中で失敗すると`PidToId'には含まれていなくても
+            %%       'EXIT'メッセージが飛んでくることがあるので無視する
+            {noreply, State};
         {ok,  Id} ->
             [Entity] = ets:lookup(IdToEntity, Id),
             ok = handle_event_if_exported(Module, {'ENTITY_DELETED', Entity, Reason}),
