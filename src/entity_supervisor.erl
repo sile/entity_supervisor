@@ -225,9 +225,9 @@ safe_gen_server_call(ManagerRef, Message) ->
     try
         gen_server:call(ManagerRef, Message)
     catch
-        error:{timeout, _} -> {error, {timeout, ManagerRef}};
-        exit:{noproc, _}   -> {error, {noproc, ManagerRef}};
-        Class:Reason       -> {error, {exception, Class, Reason, erlang:get_stacktrace()}}
+        exit:{timeout, _} -> {error, {timeout, ManagerRef}};
+        exit:{noproc, _}  -> {error, {noproc, ManagerRef}};
+        Class:Reason      -> {error, {exception, Class, Reason, erlang:get_stacktrace()}}
     end.
 
 -spec do_create_entity({entity_id(), [attribute()], term()}, #?STATE{}) -> {Result, #?STATE{}} when
