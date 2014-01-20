@@ -63,6 +63,98 @@ create_entity_test_() ->
 
               %% スーパバイザ停止時に、エンティティも解放される
               ?assertEqual(false, is_process_alive(EntityPid))
+      end},
+     {"特定のエンティティ作成がブロックしている場合でも、IDが異なるエンティティの作成には影響を与えない",
+      fun () ->
+              {ok, SupPid} = entity_supervisor:start_link(slow_init_entity_supervisor, []),
+
+              Parent = self(),
+              
+              %% ブロック
+              EntityId1 = <<"entity1">>,
+              Pid1 = spawn(fun () ->
+                                   Result = entity_supervisor:create_entity(SupPid, EntityId1, [], [[500]]),
+                                   Parent ! {result, self(), Result}
+                           end),
+
+              %% 同じID
+              Pid2 = spawn(fun () ->
+                                   Result = entity_supervisor:create_entity(SupPid, EntityId1, [], [[0]]),
+                                   Parent ! {result, self(), Result}
+                           end),
+
+              %% 別ID
+              EntityId2 = <<"entity2">>,
+              Pid3 = spawn(fun () ->
+                                   Result = entity_supervisor:create_entity(SupPid, EntityId2, [], [[0]]),
+                                   Parent ! {result, self(), Result}
+                           end),
+
+              receive
+                  {result, ResultPid1, Result1} ->    
+                      ?assertMatch({ok, _}, Result1),
+                      ?assertEqual(Pid3, ResultPid1)  % EntityId2の生成が一番終わるのが早い
+                      
+              end,
+              receive
+                  {result, ResultPid2, {ok, EntityPid1}} ->
+                      ?assertEqual(Pid1, ResultPid2)
+              end,
+              receive
+                  {result, ResultPid3, Result3} ->
+                      ?assertEqual({error, {already_exists, EntityPid1}}, Result3),
+                      ?assertEqual(Pid2, ResultPid3)
+              end
+      end},
+     {"特定のエンティティ作成でブロック中のプロセスが死んだ場合は、同じIDに対する次のプロセスに生成権利が引き継がれる",
+      fun () ->
+              {ok, SupPid} = entity_supervisor:start_link(slow_init_entity_supervisor, []),
+
+              Parent = self(),
+              
+              %% ブロック
+              EntityId1 = <<"entity1">>,
+              Pid1 = spawn(fun () ->
+                                   Result = entity_supervisor:create_entity(SupPid, EntityId1, [], [[100, wrong_timeout, 500]]),
+                                   Parent ! {result, self(), Result}
+                           end),
+
+              %% 同じID
+              Pid2 = spawn(fun () ->
+                                   Result = entity_supervisor:create_entity(SupPid, EntityId1, [], [[0]]),
+                                   Parent ! {result, self(), Result}
+                           end),
+              receive
+                  {result, ResultPid1, {ok, _}} -> ?assertEqual(Pid2, ResultPid1)
+              end,
+              receive
+                  {result, ResultPid2, {error, _}} -> ?assertEqual(Pid1, ResultPid2)
+              end
+      end},
+     {"特定のエンティティ作成でブロック中のプロセスが死んで、かつ次のプロセスも死んでいる場合",
+      fun () ->
+              {ok, SupPid} = entity_supervisor:start_link(slow_init_entity_supervisor, []),
+
+              Parent = self(),
+              
+              %% ブロック
+              EntityId1 = <<"entity1">>,
+              Pid1 = spawn(fun () ->
+                                   Result = entity_supervisor:create_entity(SupPid, EntityId1, [], [[100, wrong_timeout]]),
+                                   Parent ! {result, self(), Result}
+                           end),
+
+              %% 同じID
+              Pid2 = spawn(fun () ->
+                                   Result = entity_supervisor:create_entity(SupPid, EntityId1, [], [[0]], 10),
+                                   Parent ! {result, self(), Result}
+                           end),
+              receive
+                  {result, ResultPid1, {error, _}} -> ?assertEqual(Pid2, ResultPid1)
+              end,
+              receive
+                  {result, ResultPid2, {error, _}} -> ?assertEqual(Pid1, ResultPid2)
+              end
       end}
     ].
 

@@ -12,6 +12,7 @@
          start_link/2,
          start_link/3,
          create_entity/4,
+         create_entity/5,
          find_entity/2,
          find_entity_by_attributes/2,
          delete_entity/2, delete_entity/3,
@@ -59,7 +60,10 @@
 
           id_to_entity             :: ets:tid(), % entity_id() => entity()
           pid_to_id   = dict:new() :: dict(),    % pid() => entity_id()
-          attr_to_ids = dict:new() :: dict()     % attribute() => set of entity_id()
+          attr_to_ids = dict:new() :: dict(),    % attribute() => set of entity_id()
+
+          reserve_queues = dict:new() :: dict(),  % entity_id() => Waitings::queue(From)
+          right_holders  = dict:new() :: dict()   % pid() => entity_id()
         }).
 
 -type manager_name() :: {local, LocalName::atom()}
@@ -84,6 +88,8 @@
 -type system_event() :: {'ENTITY_CREATED', entity()}
                       | {'ENTITY_DELETED', entity(), Reason::term()}.
 
+-type from() :: {pid(), Tag::term()}.
+
 %%--------------------------------------------------------------------------------
 %% Exported Functions
 %%--------------------------------------------------------------------------------
@@ -100,10 +106,39 @@ start_link(ManagerName, Module, Args) ->
            end,
     gen_server:start_link(ManagerName, ?MODULE, [Name, Module, Args], []).
 
+-spec create_entity(manager_ref(), entity_id(), [attribute()], [term()], timeout()) -> {ok, pid()} | {error, Reason} when
+      Reason :: {already_exists, pid()} | {timeout, manager_ref()} | {noproc, manager_ref()} | term().
+create_entity(ManagerRef, EntityId, Attrs, Args, Timeout) ->
+    Parent = self(),
+    Ref = make_ref(),
+    Fun = fun() ->
+                  Result =
+                      case reserve(ManagerRef, EntityId, Timeout) of
+                          {error, Reason} -> {error, Reason};
+                          {ok, MFArgs}    ->
+                              {Module, Function, DefaultArgs} = MFArgs,
+                              case apply(Module, Function, DefaultArgs ++ Args) of
+                                  {error, Reason} -> {error, Reason};
+                                  {ok, EntityPid} ->
+                                      ok = confirm_reservation(ManagerRef, EntityId, EntityPid, Attrs, Timeout),
+                                      {ok, EntityPid}
+                              end
+                      end,
+                  Parent ! {Ref, Result}
+          end,
+    Monitor = monitor(process, spawn(Fun)),
+    receive
+        {Ref, Result} ->
+            _ = demonitor(Monitor, [flush]),
+            Result;
+        {'DOWN', Monitor, _, Pid, Reason} ->
+            {error, {temporary_process_down, Pid, Reason}}
+    end.
+
 -spec create_entity(manager_ref(), entity_id(), [attribute()], [term()]) -> {ok, pid()} | {error, Reason} when
       Reason :: {already_exists, pid()} | {timeout, manager_ref()} | {noproc, manager_ref()} | term().
 create_entity(ManagerRef, EntityId, Attrs, Args) ->
-    safe_gen_server_call(ManagerRef, {create_entity, {EntityId, Attrs, Args}}).
+    create_entity(ManagerRef, EntityId, Attrs, Args, 5000).
 
 -spec find_entity(manager_ref(), entity_id()) -> {ok, entity()} | {error, Reason} when
       Reason :: not_found | {timeout, manager_ref()} | {noproc, manager_ref()} | term().
@@ -161,8 +196,15 @@ init([TableName, Module, Args]) ->
     {ok, State}.
 
 %% @hidden
-handle_call({create_entity, Arg}, _From, State) ->
-    {Result, State2} = do_create_entity(Arg, State),
+handle_call({reserve, Arg}, From, State) ->
+    {Result, State2} = do_reserve(Arg, From, State),
+    case Result of
+        {ok, MFArgs}    -> {reply, {ok, MFArgs}, State2};
+        {error, queued} -> {noreply, State2};
+        {error, Reason} -> {reply, {error, Reason}, State2}
+    end;
+handle_call({confirm_reservation, Arg}, _From, State) ->
+    {Result, State2} = do_confirm_reservation(Arg, State),
     {reply, Result, State2};
 handle_call({find_entity, Arg}, _From, State) ->
     Result = do_find_entity(Arg, State),
@@ -189,12 +231,31 @@ handle_cast(Request, State) ->
 handle_info({exit_timeout, Pid}, State) ->
     true = exit(Pid, kill),
     {noreply, State};
+handle_info({'DOWN', _, _, Pid, _}, State) ->
+    #?STATE{create_mfargs = MFArgs, reserve_queues = Queues, right_holders = Holders} = State,
+    case dict:find(Pid, Holders) of
+        error          -> {noreply, State};   % Queuesの中に入っているプロセスのダウンはここでは無視して、後でis_process_alive/1でチェックする
+        {ok, EntityId} ->
+            Queue = dict:fetch(EntityId, Queues),
+            case take_first_alive_waiter(Queue) of
+                empty ->
+                    Holders2 = dict:erase(Pid, Holders),
+                    Queues2  = dict:erase(EntityId, Queues),
+                    State2 = State#?STATE{right_holders = Holders2, reserve_queues = Queues2},
+                    {noreply, State2};
+                {{WaiterPid, _} = From, Queue2} ->
+                    _ = gen_server:reply(From, {ok, MFArgs}),
+                    Holders2 = dict:store(WaiterPid, EntityId, Holders),
+                    Queues2  = dict:store(EntityId, Queue2, Queues),
+                    State2 = State#?STATE{right_holders = Holders2, reserve_queues = Queues2},
+                    {noreply, State2}
+            end
+    end;
 handle_info({'EXIT', Pid, Reason}, State) ->
     #?STATE{pid_to_id = PidToId, id_to_entity = IdToEntity, module = Module} = State,
     case dict:find(Pid, PidToId) of
         error ->
-            %% NOTE: エンティティの起動がstart_link関数で行われ、かつそのinit/1の中で失敗すると`PidToId'には含まれていなくても
-            %%       'EXIT'メッセージが飛んでくることがあるので無視する
+            ok = error_logger:warning_msg("unknown 'EXIT' message: pid=~p, reason=~p", [Pid, Reason]),
             {noreply, State};
         {ok,  Id} ->
             [Entity] = ets:lookup(IdToEntity, Id),
@@ -219,41 +280,78 @@ code_change(_OldVsn, State, _Extra) ->
 %%--------------------------------------------------------------------------------
 %% Internal Functions
 %%--------------------------------------------------------------------------------
--spec safe_gen_server_call(manager_ref(), term()) -> term() | {error, Reason} when
+-spec reserve(manager_ref(), entity_id(), timeout()) -> {ok, mfargs()} | {error, Reason} when
+      Reason :: {timeout, manager_ref()} | {noproc, manager_ref()} | {already_exists, pid()} | term().
+reserve(ManagerRef, EntityId, Timeout) ->
+    safe_gen_server_call(ManagerRef, {reserve, {self(), EntityId}}, Timeout).
+
+-spec confirm_reservation(manager_ref(), entity_id(), pid(), [attribute()], timeout()) -> ok.
+confirm_reservation(ManagerRef, EntityId, EntityPid, Attributes, Timeout) ->
+    ok = safe_gen_server_call(ManagerRef, {confirm_reservation, {self(), {EntityId, EntityPid, Attributes}}}, Timeout),
+    true = unlink(EntityPid),
+    ok.
+
+-spec do_reserve({Requester::pid(), entity_id()}, From::term(), #?STATE{}) -> {Result, #?STATE{}} when
+      Result :: {ok, mfargs()} | {error, Reason},
+      Reason :: {already_exists, pid()} | queued | term().
+do_reserve({Requester, Id}, From, State) ->
+    #?STATE{create_mfargs = MFArgs, id_to_entity = IdToEntity, reserve_queues = Queues} = State,
+    case ets:lookup(IdToEntity, Id) of
+        [{_, Pid, _}] -> {{error, {already_exists, Pid}}, State};
+        []            ->
+            _ = monitor(process, Requester),
+            case dict:find(Id, Queues) of
+                error ->
+                    Queues2  = dict:store(Id, queue:new(), Queues),
+                    Holders2 = dict:store(Requester, Id, State#?STATE.right_holders),
+                    {{ok, MFArgs}, State#?STATE{reserve_queues = Queues2, right_holders = Holders2}};
+                {ok, WaitingQueue} ->
+                    Queues2 = dict:store(Id, queue:in(From, WaitingQueue), Queues),
+                    {{error, queued}, State#?STATE{reserve_queues = Queues2}}
+            end
+    end.
+
+-spec do_confirm_reservation({Requester::pid(), entity()}, #?STATE{}) -> {Result, #?STATE{}} when
+      Result :: ok | {error, Reason::term()}.
+do_confirm_reservation({Requester, Entity}, State) ->
+    #?STATE{reserve_queues = Queues, right_holders = Holders} = State,
+    {EntityId, EntityPid, _} = Entity,
+    true = link(EntityPid),
+    ok = handle_event_if_exported(State#?STATE.module, {'ENTITY_CREATED', Entity}),
+    State2 = insert_entity_entry(Entity, State),
+    ok = lists:foreach(fun (From) -> gen_server:reply(From, {error, {already_exists, EntityPid}}) end,
+                       queue:to_list(dict:fetch(EntityId, Queues))),
+    Queues2  = dict:erase(EntityId, Queues),
+    Holders2 = dict:erase(Requester, Holders),
+    {ok, State2#?STATE{reserve_queues = Queues2, right_holders = Holders2}}.
+
+-spec take_first_alive_waiter(queue()) -> empty | {from(), queue()}.
+take_first_alive_waiter(Queue) ->
+    case queue:out(Queue) of
+        {empty, _}              -> empty;
+        {{value, From}, Queue2} ->
+            {Pid, _} = From,
+            case is_process_alive(Pid) of
+                false -> take_first_alive_waiter(Queue2);
+                true  -> {From, Queue2}
+            end
+    end.
+
+-spec safe_gen_server_call(manager_ref(), term(), timeout()) -> term() | {error, Reason} when
       Reason :: {timeout, manager_ref()} | {noproc, manager_ref()} | term().
-safe_gen_server_call(ManagerRef, Message) ->
+safe_gen_server_call(ManagerRef, Message, Timeout) ->
     try
-        gen_server:call(ManagerRef, Message)
+        gen_server:call(ManagerRef, Message, Timeout)
     catch
         exit:{timeout, _} -> {error, {timeout, ManagerRef}};
         exit:{noproc, _}  -> {error, {noproc, ManagerRef}};
         Class:Reason      -> {error, {exception, Class, Reason, erlang:get_stacktrace()}}
     end.
 
--spec do_create_entity({entity_id(), [attribute()], term()}, #?STATE{}) -> {Result, #?STATE{}} when
-      Result :: {ok, pid()} | {error, Reason},
-      Reason :: {already_exists, pid()} | term().
-do_create_entity({Id, Attributes, Args}, State) ->
-    #?STATE{create_mfargs = {Module, Function, DefaultArgs}, id_to_entity = IdToEntity} = State,
-    case ets:lookup(IdToEntity, Id) of
-        [{_, Pid, _}] -> {{error, {already_exists, Pid}}, State};
-        []            ->
-            try apply(Module, Function, DefaultArgs ++ Args) of
-                {error, Reason} ->
-                    {{error, Reason}, State};
-                {ok, EntityPid} ->
-                    true = link(EntityPid),
-                    Entity = {Id, EntityPid, Attributes},
-                    ok = handle_event_if_exported(State#?STATE.module, {'ENTITY_CREATED', Entity}),
-                    State2 = insert_entity_entry(Entity, State),
-                    {{ok, EntityPid}, State2};
-                Other ->
-                    {error, {entity_process_creation_failed, {mfargs, Module, Function, DefaultArgs ++ Args}, {response, Other}}}
-            catch
-                ExClass:ExReason ->
-                    {{error, {exception, ExClass, ExReason, erlang:get_stacktrace()}}, State}
-            end
-    end.
+-spec safe_gen_server_call(manager_ref(), term()) -> term() | {error, Reason} when
+      Reason :: {timeout, manager_ref()} | {noproc, manager_ref()} | term().
+safe_gen_server_call(ManagerRef, Message) ->
+    safe_gen_server_call(ManagerRef, Message, 5000).
 
 -spec do_find_entity(entity_id(), #?STATE{}) -> {ok, entity()} | {error, Reason} when
       Reason :: not_found.

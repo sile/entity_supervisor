@@ -1,7 +1,7 @@
 {application, entity_supervisor,
  [
   {description, "Simple Supervisor for Entity Processes"},
-  {vsn, "0.1.3"},
+  {vsn, "0.1.4"},
   {registered, []},
   {applications, [
                   kernel,
