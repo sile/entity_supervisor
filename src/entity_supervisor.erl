@@ -151,7 +151,7 @@ find_entity(ManagerRef, EntityId) when is_atom(ManagerRef) ->
 find_entity(ManagerRef, EntityId) ->
     safe_gen_server_call(ManagerRef, {find_entity, EntityId}).
 
--spec find_entity_by_attributes(manager_ref(), [attribute()]) -> {ok, [pid()]} | {error, Reason} when
+-spec find_entity_by_attributes(manager_ref(), [attribute()]) -> {ok, [entity()]} | {error, Reason} when
       Reason :: {timeout, manager_ref()} | {noproc, manager_ref()} | term().
 find_entity_by_attributes(ManagerRef, Attributes) ->
     safe_gen_server_call(ManagerRef, {find_entity_by_attributes, Attributes}).
