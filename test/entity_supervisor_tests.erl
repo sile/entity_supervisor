@@ -1,3 +1,5 @@
+%% coding: latin-1
+%%
 %% @copyright 2013 Takeru Ohta <phjgt308@gmail.com>
 -module(entity_supervisor_tests).
 
