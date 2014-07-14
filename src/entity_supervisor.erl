@@ -4,6 +4,7 @@
 -module(entity_supervisor).
 
 -behaviour(gen_server).
+-compile(nowarn_deprecated_type).
 
 %%--------------------------------------------------------------------------------
 %% Exported API
