@@ -60,11 +60,11 @@
           shutdown      :: shutdown(),
 
           id_to_entity             :: ets:tid(), % entity_id() => entity()
-          pid_to_id   = dict:new() :: dict(),    % pid() => entity_id()
-          attr_to_ids = dict:new() :: dict(),    % attribute() => set of entity_id()
+          pid_to_id   = dict:new() :: dict:dict(),    % pid() => entity_id()
+          attr_to_ids = dict:new() :: dict:dict(),    % attribute() => set of entity_id()
 
-          reserve_queues = dict:new() :: dict(),  % entity_id() => Waitings::queue(From)
-          right_holders  = dict:new() :: dict()   % pid() => entity_id()
+          reserve_queues = dict:new() :: dict:dict(),  % entity_id() => Waitings::queue(From)
+          right_holders  = dict:new() :: dict:dict()   % pid() => entity_id()
         }).
 
 -type manager_name() :: {local, LocalName::atom()}
@@ -326,7 +326,7 @@ do_confirm_reservation({Requester, Entity}, State) ->
     Holders2 = dict:erase(Requester, Holders),
     {ok, State2#?STATE{reserve_queues = Queues2, right_holders = Holders2}}.
 
--spec take_first_alive_waiter(queue()) -> empty | {from(), queue()}.
+-spec take_first_alive_waiter(queue:queue()) -> empty | {from(), queue:queue()}.
 take_first_alive_waiter(Queue) ->
     case queue:out(Queue) of
         {empty, _}              -> empty;
@@ -483,7 +483,7 @@ delete_entity_entry(Entity, State) ->
 handle_event_if_exported(Module, Event) ->
     _ = case erlang:function_exported(Module, handle_event, 1) of
             false -> ok;
-            true  -> 
+            true  ->
                 try Module:handle_event(Event) of
                     _ -> ok
                 catch
