@@ -275,6 +275,18 @@ terminate(Reason, State) ->
     ok.
 
 %% @hidden
+code_change(_OldVsn, Old, _Extra) when not is_record(Old, ?STATE) ->
+    NewSize = record_info(size, ?STATE),
+    OldSize = tuple_size(Old),
+    Olds = tuple_to_list(#?STATE{}),
+    New =
+        case OldSize > NewSize of
+            true  -> list_to_tuple(lists:sublist(Olds, 1, NewSize));
+            false ->
+                Defaults = lists:nthtail(OldSize, tuple_to_list(#?STATE{})),
+                list_to_tuple(Olds ++ Defaults)
+        end,
+    {ok, New};
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
