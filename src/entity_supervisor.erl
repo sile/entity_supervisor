@@ -52,6 +52,9 @@
 %%--------------------------------------------------------------------------------
 -define(STATE, ?MODULE).
 
+-type my_dict() :: term(). % dict:dict()
+-type my_queue() :: term(). % queue:queue()
+
 -record(?STATE,
         {
           module        :: module(),
@@ -60,11 +63,11 @@
           shutdown      :: shutdown(),
 
           id_to_entity             :: ets:tid(), % entity_id() => entity()
-          pid_to_id   = dict:new() :: dict:dict(),    % pid() => entity_id()
-          attr_to_ids = dict:new() :: dict:dict(),    % attribute() => set of entity_id()
+          pid_to_id   = dict:new() :: my_dict(),    % pid() => entity_id()
+          attr_to_ids = dict:new() :: my_dict(),    % attribute() => set of entity_id()
 
-          reserve_queues = dict:new() :: dict:dict(),  % entity_id() => Waitings::queue(From)
-          right_holders  = dict:new() :: dict:dict()   % pid() => entity_id()
+          reserve_queues = dict:new() :: my_dict(),  % entity_id() => Waitings::queue(From)
+          right_holders  = dict:new() :: my_dict()   % pid() => entity_id()
         }).
 
 -type manager_name() :: {local, LocalName::atom()}
@@ -338,7 +341,7 @@ do_confirm_reservation({Requester, Entity}, State) ->
     Holders2 = dict:erase(Requester, Holders),
     {ok, State2#?STATE{reserve_queues = Queues2, right_holders = Holders2}}.
 
--spec take_first_alive_waiter(queue:queue()) -> empty | {from(), queue:queue()}.
+-spec take_first_alive_waiter(my_queue()) -> empty | {from(), my_queue()}.
 take_first_alive_waiter(Queue) ->
     case queue:out(Queue) of
         {empty, _}              -> empty;
