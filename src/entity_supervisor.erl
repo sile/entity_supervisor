@@ -296,7 +296,7 @@ code_change(_OldVsn, State, _Extra) ->
 update_record_layout(Old) when not is_record(Old, ?STATE) ->
     NewSize = record_info(size, ?STATE),
     OldSize = tuple_size(Old),
-    Olds = tuple_to_list(#?STATE{}),
+    Olds = tuple_to_list(Old),
     case OldSize > NewSize of
         true  -> list_to_tuple(lists:sublist(Olds, 1, NewSize));
         false ->
