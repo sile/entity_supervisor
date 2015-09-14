@@ -200,23 +200,27 @@ init([TableName, Module, Args]) ->
     {ok, State}.
 
 %% @hidden
-handle_call({reserve, Arg}, From, State) ->
+handle_call({reserve, Arg}, From, State0) ->
+    State = update_record_layout(State0),
     {Result, State2} = do_reserve(Arg, From, State),
     case Result of
         {ok, MFArgs}    -> {reply, {ok, MFArgs}, State2};
         {error, queued} -> {noreply, State2};
         {error, Reason} -> {reply, {error, Reason}, State2}
     end;
-handle_call({confirm_reservation, Arg}, _From, State) ->
+handle_call({confirm_reservation, Arg}, _From, State0) ->
+    State = update_record_layout(State0),
     {Result, State2} = do_confirm_reservation(Arg, State),
     {reply, Result, State2};
 handle_call({find_entity, Arg}, _From, State) ->
     Result = do_find_entity(Arg, State),
     {reply, Result, State};
-handle_call({find_entity_by_attributes, Arg}, _From, State) ->
+handle_call({find_entity_by_attributes, Arg}, _From, State0) ->
+    State = update_record_layout(State0),
     Result = do_find_entity_by_attributes(Arg, State),
     {reply, Result, State};
-handle_call(get_entities, _From, State) ->
+handle_call(get_entities, _From, State0) ->
+    State = update_record_layout(State0),
     Result = do_get_entities(State),
     {reply, Result, State};
 handle_call(Request, From, State) ->
@@ -224,7 +228,8 @@ handle_call(Request, From, State) ->
     {noreply, State}.
 
 %% @hidden
-handle_cast({delete_entity, Arg}, State) ->
+handle_cast({delete_entity, Arg}, State0) ->
+    State = update_record_layout(State0),
     State2 = do_delete_entity(Arg, State),
     {noreply, State2};
 handle_cast(Request, State) ->
@@ -235,7 +240,8 @@ handle_cast(Request, State) ->
 handle_info({exit_timeout, Pid}, State) ->
     true = exit(Pid, kill),
     {noreply, State};
-handle_info({'DOWN', _, _, Pid, _}, State) ->
+handle_info({'DOWN', _, _, Pid, _}, State0) ->
+    State = update_record_layout(State0),
     #?STATE{create_mfargs = MFArgs, reserve_queues = Queues, right_holders = Holders} = State,
     case dict:find(Pid, Holders) of
         error          -> {noreply, State};   % Queuesの中に入っているプロセスのダウンはここでは無視して、後でis_process_alive/1でチェックする
@@ -255,7 +261,8 @@ handle_info({'DOWN', _, _, Pid, _}, State) ->
                     {noreply, State2}
             end
     end;
-handle_info({'EXIT', Pid, Reason}, State) ->
+handle_info({'EXIT', Pid, Reason}, State0) ->
+    State = update_record_layout(State0),
     #?STATE{pid_to_id = PidToId, id_to_entity = IdToEntity, module = Module} = State,
     case dict:find(Pid, PidToId) of
         error ->
@@ -271,31 +278,34 @@ handle_info(Info, State) ->
     {noreply, State}.
 
 %% @hidden
-terminate(Reason, State) ->
+terminate(Reason, State0) ->
+    State = update_record_layout(State0),
     #?STATE{id_to_entity = IdToEntity} = State,
     ok = exit_all_entity(Reason, State),
     true = ets:delete(IdToEntity),
     ok.
 
 %% @hidden
-code_change(_OldVsn, Old, _Extra) when not is_record(Old, ?STATE) ->
-    NewSize = record_info(size, ?STATE),
-    OldSize = tuple_size(Old),
-    Olds = tuple_to_list(#?STATE{}),
-    New =
-        case OldSize > NewSize of
-            true  -> list_to_tuple(lists:sublist(Olds, 1, NewSize));
-            false ->
-                Defaults = lists:nthtail(OldSize, tuple_to_list(#?STATE{})),
-                list_to_tuple(Olds ++ Defaults)
-        end,
-    {ok, New};
 code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
+    {ok, update_record_layout(State)}.
 
 %%--------------------------------------------------------------------------------
 %% Internal Functions
 %%--------------------------------------------------------------------------------
+-spec update_record_layout(tuple()) -> #?STATE{}.
+update_record_layout(Old) when not is_record(Old, ?STATE) ->
+    NewSize = record_info(size, ?STATE),
+    OldSize = tuple_size(Old),
+    Olds = tuple_to_list(#?STATE{}),
+    case OldSize > NewSize of
+        true  -> list_to_tuple(lists:sublist(Olds, 1, NewSize));
+        false ->
+            Defaults = lists:nthtail(OldSize, tuple_to_list(#?STATE{})),
+            list_to_tuple(Olds ++ Defaults)
+    end;
+update_record_layout(State) ->
+    State.
+
 -spec reserve(manager_ref(), entity_id(), timeout()) -> {ok, mfargs()} | {error, Reason} when
       Reason :: {timeout, manager_ref()} | {noproc, manager_ref()} | {already_exists, pid()} | term().
 reserve(ManagerRef, EntityId, Timeout) ->
